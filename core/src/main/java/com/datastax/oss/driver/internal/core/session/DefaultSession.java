@@ -15,22 +15,31 @@
  */
 package com.datastax.oss.driver.internal.core.session;
 
+import com.datastax.oss.driver.api.core.AsyncAutoCloseable;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.InvalidKeyspaceException;
+import com.datastax.oss.driver.api.core.ProtocolVersion;
 import com.datastax.oss.driver.api.core.config.CoreDriverOption;
 import com.datastax.oss.driver.api.core.config.DriverConfig;
-import com.datastax.oss.driver.api.core.cql.CqlSession;
+import com.datastax.oss.driver.api.core.context.DriverContext;
+import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.loadbalancing.LoadBalancingPolicy;
 import com.datastax.oss.driver.api.core.loadbalancing.NodeDistance;
+import com.datastax.oss.driver.api.core.metadata.Metadata;
 import com.datastax.oss.driver.api.core.metadata.Node;
 import com.datastax.oss.driver.api.core.metadata.NodeState;
+import com.datastax.oss.driver.api.core.metadata.NodeStateListener;
+import com.datastax.oss.driver.api.core.metadata.schema.SchemaChangeListener;
 import com.datastax.oss.driver.api.core.session.Request;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import com.datastax.oss.driver.internal.core.channel.DriverChannel;
 import com.datastax.oss.driver.internal.core.context.InternalDriverContext;
+import com.datastax.oss.driver.internal.core.control.ControlConnection;
 import com.datastax.oss.driver.internal.core.metadata.DefaultNode;
 import com.datastax.oss.driver.internal.core.metadata.DistanceEvent;
+import com.datastax.oss.driver.internal.core.metadata.MetadataManager;
 import com.datastax.oss.driver.internal.core.metadata.NodeStateEvent;
+import com.datastax.oss.driver.internal.core.metadata.NodeStateManager;
 import com.datastax.oss.driver.internal.core.metadata.TopologyEvent;
 import com.datastax.oss.driver.internal.core.pool.ChannelPool;
 import com.datastax.oss.driver.internal.core.pool.ChannelPoolFactory;
@@ -39,16 +48,20 @@ import com.datastax.oss.driver.internal.core.util.concurrent.CompletableFutures;
 import com.datastax.oss.driver.internal.core.util.concurrent.ReplayingEventFilter;
 import com.datastax.oss.driver.internal.core.util.concurrent.RunOrSchedule;
 import com.datastax.oss.driver.internal.core.util.concurrent.UncaughtExceptions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.MapMaker;
 import io.netty.util.concurrent.EventExecutor;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -77,8 +90,11 @@ public class DefaultSession implements CqlSession {
   private static final Logger LOG = LoggerFactory.getLogger(DefaultSession.class);
 
   public static CompletionStage<CqlSession> init(
-      InternalDriverContext context, CqlIdentifier keyspace, String logPrefix) {
-    return new DefaultSession(context, keyspace, logPrefix).init();
+      InternalDriverContext context,
+      Set<InetSocketAddress> contactPoints,
+      CqlIdentifier keyspace,
+      Set<NodeStateListener> nodeStateListeners) {
+    return new DefaultSession(context, contactPoints, keyspace, nodeStateListeners).init();
   }
 
   private final InternalDriverContext context;
@@ -86,6 +102,7 @@ public class DefaultSession implements CqlSession {
   private final EventExecutor adminExecutor;
   private final String logPrefix;
   private final SingleThreaded singleThreaded;
+  private final MetadataManager metadataManager;
   private final RequestProcessorRegistry processorRegistry;
 
   // This is read concurrently, but only updated from adminExecutor
@@ -107,19 +124,60 @@ public class DefaultSession implements CqlSession {
   private ConcurrentMap<ByteBuffer, RepreparePayload> repreparePayloads =
       new MapMaker().weakValues().makeMap();
 
-  private DefaultSession(InternalDriverContext context, CqlIdentifier keyspace, String logPrefix) {
+  private DefaultSession(
+      InternalDriverContext context,
+      Set<InetSocketAddress> contactPoints,
+      CqlIdentifier keyspace,
+      Set<NodeStateListener> nodeStateListeners) {
+    LOG.debug("Creating new session {}", context.sessionName());
     this.adminExecutor = context.nettyOptions().adminEventExecutorGroup().next();
     this.context = context;
     this.config = context.config();
-    this.singleThreaded = new SingleThreaded(context);
+    this.singleThreaded = new SingleThreaded(context, contactPoints, nodeStateListeners);
+    this.metadataManager = context.metadataManager();
     this.processorRegistry = context.requestProcessorRegistry();
     this.keyspace = keyspace;
-    this.logPrefix = logPrefix;
+    this.logPrefix = context.sessionName();
   }
 
   private CompletionStage<CqlSession> init() {
     RunOrSchedule.on(adminExecutor, singleThreaded::init);
     return singleThreaded.initFuture;
+  }
+
+  @Override
+  public String getName() {
+    return context.sessionName();
+  }
+
+  @Override
+  public Metadata getMetadata() {
+    return metadataManager.getMetadata();
+  }
+
+  @Override
+  public boolean isSchemaMetadataEnabled() {
+    return metadataManager.isSchemaEnabled();
+  }
+
+  @Override
+  public CompletionStage<Metadata> setSchemaMetadataEnabled(Boolean newValue) {
+    return metadataManager.setSchemaEnabled(newValue);
+  }
+
+  @Override
+  public CompletionStage<Metadata> refreshSchemaAsync() {
+    return metadataManager.refreshSchema(null, true, true);
+  }
+
+  @Override
+  public CompletionStage<Boolean> checkSchemaAgreementAsync() {
+    return context.topologyMonitor().checkSchemaAgreement();
+  }
+
+  @Override
+  public DriverContext getContext() {
+    return context;
   }
 
   @Override
@@ -192,6 +250,26 @@ public class DefaultSession implements CqlSession {
   }
 
   @Override
+  public void register(SchemaChangeListener listener) {
+    RunOrSchedule.on(adminExecutor, () -> singleThreaded.register(listener));
+  }
+
+  @Override
+  public void unregister(SchemaChangeListener listener) {
+    RunOrSchedule.on(adminExecutor, () -> singleThreaded.unregister(listener));
+  }
+
+  @Override
+  public void register(NodeStateListener listener) {
+    RunOrSchedule.on(adminExecutor, () -> singleThreaded.register(listener));
+  }
+
+  @Override
+  public void unregister(NodeStateListener listener) {
+    RunOrSchedule.on(adminExecutor, () -> singleThreaded.unregister(listener));
+  }
+
+  @Override
   public CompletionStage<Void> closeFuture() {
     return singleThreaded.closeFuture;
   }
@@ -211,6 +289,8 @@ public class DefaultSession implements CqlSession {
   private class SingleThreaded {
 
     private final InternalDriverContext context;
+    private final Set<InetSocketAddress> initialContactPoints;
+    private final NodeStateManager nodeStateManager;
     private final ChannelPoolFactory channelPoolFactory;
     private final CompletableFuture<CqlSession> initFuture = new CompletableFuture<>();
     private boolean initWasCalled;
@@ -229,9 +309,22 @@ public class DefaultSession implements CqlSession {
     // If we receive events while a pool is initializing, the last one is stored here
     private final Map<Node, DistanceEvent> pendingDistanceEvents = new WeakHashMap<>();
     private final Map<Node, NodeStateEvent> pendingStateEvents = new WeakHashMap<>();
+    private Set<SchemaChangeListener> schemaChangeListeners = new HashSet<>();
+    private Set<NodeStateListener> nodeStateListeners;
 
-    private SingleThreaded(InternalDriverContext context) {
+    private SingleThreaded(
+        InternalDriverContext context,
+        Set<InetSocketAddress> contactPoints,
+        Set<NodeStateListener> nodeStateListeners) {
       this.context = context;
+      this.nodeStateManager = new NodeStateManager(context);
+      this.initialContactPoints = contactPoints;
+      this.nodeStateListeners = nodeStateListeners;
+      new SchemaListenerNotifier(schemaChangeListeners, context.eventBus(), adminExecutor);
+      context
+          .eventBus()
+          .register(
+              NodeStateEvent.class, RunOrSchedule.on(adminExecutor, this::onNodeStateChanged));
       this.channelPoolFactory = context.channelPoolFactory();
       this.distanceListenerKey =
           context
@@ -255,8 +348,80 @@ public class DefaultSession implements CqlSession {
         return;
       }
       initWasCalled = true;
-
       LOG.debug("[{}] Starting initialization", logPrefix);
+
+      nodeStateListeners.forEach(l -> l.onRegister(DefaultSession.this));
+
+      MetadataManager metadataManager = context.metadataManager();
+      metadataManager
+          // Store contact points in the metadata right away, the control connection will need them
+          // if it has to initialize (if the set is empty, 127.0.0.1 is used as a default).
+          .addContactPoints(initialContactPoints)
+          .thenCompose(v -> context.topologyMonitor().init())
+          .thenCompose(v -> metadataManager.refreshNodes())
+          .thenAccept(this::afterInitialNodeListRefresh)
+          .exceptionally(
+              error -> {
+                initFuture.completeExceptionally(error);
+                RunOrSchedule.on(adminExecutor, this::close);
+                return null;
+              });
+    }
+
+    private void afterInitialNodeListRefresh(@SuppressWarnings("unused") Void ignored) {
+      try {
+        boolean protocolWasForced =
+            context.config().getDefaultProfile().isDefined(CoreDriverOption.PROTOCOL_VERSION);
+        boolean needSchemaRefresh = true;
+        if (!protocolWasForced) {
+          ProtocolVersion currentVersion = context.protocolVersion();
+          ProtocolVersion bestVersion =
+              context
+                  .protocolVersionRegistry()
+                  .highestCommon(metadataManager.getMetadata().getNodes().values());
+          if (!currentVersion.equals(bestVersion)) {
+            LOG.info(
+                "[{}] Negotiated protocol version {} for the initial contact point, "
+                    + "but other nodes only support {}, downgrading",
+                logPrefix,
+                currentVersion,
+                bestVersion);
+            context.channelFactory().setProtocolVersion(bestVersion);
+            ControlConnection controlConnection = context.controlConnection();
+            // Might not have initialized yet if there is a custom TopologyMonitor
+            if (controlConnection.isInit()) {
+              controlConnection.reconnectNow();
+              // Reconnection already triggers a full schema refresh
+              needSchemaRefresh = false;
+            }
+          }
+        }
+        if (needSchemaRefresh) {
+          metadataManager.refreshSchema(null, false, true);
+        }
+        metadataManager.firstSchemaRefreshFuture().thenAccept(this::afterInitialSchemaRefresh);
+
+      } catch (Throwable throwable) {
+        initFuture.completeExceptionally(throwable);
+      }
+    }
+
+    private void afterInitialSchemaRefresh(@SuppressWarnings("unused") Void ignored) {
+      try {
+        nodeStateManager.markInitialized();
+        context.loadBalancingPolicyWrapper().init();
+        context.configLoader().onDriverInit(context);
+        LOG.debug("[{}] Initialization complete, ready", logPrefix);
+        initPools();
+      } catch (Throwable throwable) {
+        initFuture.completeExceptionally(throwable);
+      }
+    }
+
+    private void initPools() {
+      assert adminExecutor.inEventLoop();
+
+      LOG.debug("[{}] Initializing connection pools", logPrefix);
 
       // Make sure we don't miss any event while the pools are initializing
       distanceEventFilter.start();
@@ -490,6 +655,61 @@ public class DefaultSession implements CqlSession {
       CompletableFutures.completeFrom(CompletableFutures.allDone(poolReadyFutures), doneFuture);
     }
 
+    private void register(SchemaChangeListener listener) {
+      assert adminExecutor.inEventLoop();
+      if (closeWasCalled) {
+        return;
+      }
+      // We want onRegister to be called before any event. We can add the listener before, because
+      // schema events are processed on this same thread.
+      if (schemaChangeListeners.add(listener)) {
+        listener.onRegister(DefaultSession.this);
+      }
+    }
+
+    private void unregister(SchemaChangeListener listener) {
+      assert adminExecutor.inEventLoop();
+      if (closeWasCalled) {
+        return;
+      }
+      if (schemaChangeListeners.remove(listener)) {
+        listener.onUnregister(DefaultSession.this);
+      }
+    }
+
+    private void register(NodeStateListener listener) {
+      assert adminExecutor.inEventLoop();
+      if (closeWasCalled) {
+        return;
+      }
+      if (nodeStateListeners.add(listener)) {
+        listener.onRegister(DefaultSession.this);
+      }
+    }
+
+    private void unregister(NodeStateListener listener) {
+      assert adminExecutor.inEventLoop();
+      if (closeWasCalled) {
+        return;
+      }
+      if (nodeStateListeners.remove(listener)) {
+        listener.onUnregister(DefaultSession.this);
+      }
+    }
+
+    private void onNodeStateChanged(NodeStateEvent event) {
+      assert adminExecutor.inEventLoop();
+      if (event.newState == null) {
+        nodeStateListeners.forEach(listener -> listener.onRemove(event.node));
+      } else if (event.oldState == null && event.newState == NodeState.UNKNOWN) {
+        nodeStateListeners.forEach(listener -> listener.onAdd(event.node));
+      } else if (event.newState == NodeState.UP) {
+        nodeStateListeners.forEach(listener -> listener.onUp(event.node));
+      } else if (event.newState == NodeState.DOWN || event.newState == NodeState.FORCED_DOWN) {
+        nodeStateListeners.forEach(listener -> listener.onDown(event.node));
+      }
+    }
+
     private void close() {
       assert adminExecutor.inEventLoop();
       if (closeWasCalled) {
@@ -503,12 +723,23 @@ public class DefaultSession implements CqlSession {
       context.eventBus().unregister(stateListenerKey, NodeStateEvent.class);
       context.eventBus().unregister(topologyListenerKey, TopologyEvent.class);
 
-      List<CompletionStage<Void>> closePoolStages = new ArrayList<>(pools.size());
-      for (ChannelPool pool : pools.values()) {
-        closePoolStages.add(pool.closeAsync());
+      for (SchemaChangeListener listener : schemaChangeListeners) {
+        listener.onUnregister(DefaultSession.this);
+      }
+      schemaChangeListeners.clear();
+      for (NodeStateListener listener : nodeStateListeners) {
+        listener.onUnregister(DefaultSession.this);
+      }
+      nodeStateListeners.clear();
+
+      closePolicies();
+
+      List<CompletionStage<Void>> childrenCloseStages = new ArrayList<>();
+      for (AsyncAutoCloseable closeable : internalComponentsToClose()) {
+        childrenCloseStages.add(closeable.closeAsync());
       }
       CompletableFutures.whenAllDone(
-          closePoolStages, () -> onAllPoolsClosed(closePoolStages), adminExecutor);
+          childrenCloseStages, () -> onChildrenClosed(childrenCloseStages), adminExecutor);
     }
 
     private void forceClose() {
@@ -523,40 +754,89 @@ public class DefaultSession implements CqlSession {
           (closeWasCalled ? "" : "not "));
 
       if (closeWasCalled) {
-        for (ChannelPool pool : pools.values()) {
-          pool.forceCloseAsync();
+        // onChildrenClosed has already been scheduled
+        for (AsyncAutoCloseable closeable : internalComponentsToClose()) {
+          closeable.forceCloseAsync();
         }
       } else {
-        List<CompletionStage<Void>> closePoolStages = new ArrayList<>(pools.size());
-        for (ChannelPool pool : pools.values()) {
-          closePoolStages.add(pool.forceCloseAsync());
+        context.eventBus().unregister(distanceListenerKey, DistanceEvent.class);
+        context.eventBus().unregister(stateListenerKey, NodeStateEvent.class);
+        context.eventBus().unregister(topologyListenerKey, TopologyEvent.class);
+        for (SchemaChangeListener listener : schemaChangeListeners) {
+          listener.onUnregister(DefaultSession.this);
+        }
+        schemaChangeListeners.clear();
+        for (NodeStateListener listener : nodeStateListeners) {
+          listener.onUnregister(DefaultSession.this);
+        }
+        nodeStateListeners.clear();
+        closePolicies();
+        List<CompletionStage<Void>> childrenCloseStages = new ArrayList<>();
+        for (AsyncAutoCloseable closeable : internalComponentsToClose()) {
+          childrenCloseStages.add(closeable.forceCloseAsync());
         }
         CompletableFutures.whenAllDone(
-            closePoolStages, () -> onAllPoolsClosed(closePoolStages), adminExecutor);
+            childrenCloseStages, () -> onChildrenClosed(childrenCloseStages), adminExecutor);
       }
     }
 
-    private void onAllPoolsClosed(List<CompletionStage<Void>> closePoolStages) {
+    private void onChildrenClosed(List<CompletionStage<Void>> childrenCloseStages) {
       assert adminExecutor.inEventLoop();
-      Throwable firstError = null;
-      for (CompletionStage<Void> closePoolStage : closePoolStages) {
-        CompletableFuture<Void> closePoolFuture = closePoolStage.toCompletableFuture();
-        assert closePoolFuture.isDone();
-        if (closePoolFuture.isCompletedExceptionally()) {
-          Throwable error = CompletableFutures.getFailed(closePoolFuture);
-          if (firstError == null) {
-            firstError = error;
-          } else {
-            firstError.addSuppressed(error);
-          }
+      for (CompletionStage<Void> stage : childrenCloseStages) {
+        warnIfFailed(stage);
+      }
+      context
+          .nettyOptions()
+          .onClose()
+          .addListener(
+              f -> {
+                if (!f.isSuccess()) {
+                  closeFuture.completeExceptionally(f.cause());
+                } else {
+                  LOG.debug("[{}] Shutdown complete", logPrefix);
+                  closeFuture.complete(null);
+                }
+              });
+    }
+
+    private void warnIfFailed(CompletionStage<Void> stage) {
+      CompletableFuture<Void> future = stage.toCompletableFuture();
+      assert future.isDone();
+      if (future.isCompletedExceptionally()) {
+        Loggers.warnWithException(
+            LOG,
+            "[{}] Unexpected error while closing",
+            logPrefix,
+            CompletableFutures.getFailed(future));
+      }
+    }
+
+    private void closePolicies() {
+      for (AutoCloseable closeable :
+          ImmutableList.of(
+              context.reconnectionPolicy(),
+              context.retryPolicy(),
+              context.loadBalancingPolicyWrapper(),
+              context.speculativeExecutionPolicy(),
+              context.addressTranslator(),
+              context.configLoader())) {
+        try {
+          closeable.close();
+        } catch (Throwable t) {
+          Loggers.warnWithException(LOG, "[{}] Error while closing {}", logPrefix, closeable, t);
         }
       }
-      if (firstError != null) {
-        closeFuture.completeExceptionally(firstError);
-      } else {
-        LOG.debug("[{}] Shutdown complete", logPrefix);
-        closeFuture.complete(null);
-      }
+    }
+
+    private List<AsyncAutoCloseable> internalComponentsToClose() {
+      return ImmutableList.<AsyncAutoCloseable>builder()
+          .addAll(pools.values())
+          .add(
+              nodeStateManager,
+              metadataManager,
+              context.topologyMonitor(),
+              context.controlConnection())
+          .build();
     }
   }
 }

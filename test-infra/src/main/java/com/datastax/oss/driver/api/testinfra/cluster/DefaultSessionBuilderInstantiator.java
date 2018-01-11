@@ -13,10 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.datastax.oss.driver.example.guava.api;
+package com.datastax.oss.driver.api.testinfra.cluster;
 
-public class GuavaClusterUtils {
-  public static GuavaClusterBuilder builder() {
-    return new GuavaClusterBuilder();
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.session.SessionBuilder;
+
+public class DefaultSessionBuilderInstantiator {
+  public static SessionBuilder<?, ?> builder() {
+    return CqlSession.builder();
+  }
+
+  public static String configPath() {
+    return "datastax-java-driver";
   }
 }

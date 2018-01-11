@@ -83,7 +83,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class DefaultDriverContext implements InternalDriverContext {
 
-  private static final AtomicInteger CLUSTER_NAME_COUNTER = new AtomicInteger();
+  private static final AtomicInteger SESSION_NAME_COUNTER = new AtomicInteger();
 
   private final CycleDetector cycleDetector =
       new CycleDetector("Detected cycle in context initialization");
@@ -146,18 +146,18 @@ public class DefaultDriverContext implements InternalDriverContext {
   private final DriverConfigLoader configLoader;
   private final ChannelPoolFactory channelPoolFactory = new ChannelPoolFactory();
   private final CodecRegistry codecRegistry;
-  private final String clusterName;
+  private final String sessionName;
 
   public DefaultDriverContext(DriverConfigLoader configLoader, List<TypeCodec<?>> typeCodecs) {
     this.config = configLoader.getInitialConfig();
     this.configLoader = configLoader;
     DriverConfigProfile defaultProfile = config.getDefaultProfile();
-    if (defaultProfile.isDefined(CoreDriverOption.CLUSTER_NAME)) {
-      this.clusterName = defaultProfile.getString(CoreDriverOption.CLUSTER_NAME);
+    if (defaultProfile.isDefined(CoreDriverOption.SESSION_NAME)) {
+      this.sessionName = defaultProfile.getString(CoreDriverOption.SESSION_NAME);
     } else {
-      this.clusterName = "c" + CLUSTER_NAME_COUNTER.getAndIncrement();
+      this.sessionName = "s" + SESSION_NAME_COUNTER.getAndIncrement();
     }
-    this.codecRegistry = buildCodecRegistry(this.clusterName, typeCodecs);
+    this.codecRegistry = buildCodecRegistry(this.sessionName, typeCodecs);
   }
 
   protected LoadBalancingPolicy buildLoadBalancingPolicy() {
@@ -227,7 +227,7 @@ public class DefaultDriverContext implements InternalDriverContext {
   }
 
   protected EventBus buildEventBus() {
-    return new EventBus(clusterName());
+    return new EventBus(sessionName());
   }
 
   @SuppressWarnings("unchecked")
@@ -244,7 +244,7 @@ public class DefaultDriverContext implements InternalDriverContext {
   }
 
   protected ProtocolVersionRegistry buildProtocolVersionRegistry() {
-    return new CassandraProtocolVersionRegistry(clusterName());
+    return new CassandraProtocolVersionRegistry(sessionName());
   }
 
   protected NettyOptions buildNettyOptions() {
@@ -322,8 +322,8 @@ public class DefaultDriverContext implements InternalDriverContext {
   }
 
   @Override
-  public String clusterName() {
-    return clusterName;
+  public String sessionName() {
+    return sessionName;
   }
 
   @Override
@@ -438,7 +438,7 @@ public class DefaultDriverContext implements InternalDriverContext {
 
   @Override
   public RequestProcessorRegistry requestProcessorRegistry() {
-    return RequestProcessorRegistry.defaultCqlProcessors(clusterName());
+    return RequestProcessorRegistry.defaultCqlProcessors(sessionName());
   }
 
   @Override
