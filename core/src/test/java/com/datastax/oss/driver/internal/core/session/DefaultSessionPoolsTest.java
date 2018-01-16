@@ -152,6 +152,9 @@ public class DefaultSessionPoolsTest {
     Mockito.when(metadata.getNodes()).thenReturn(nodes);
     Mockito.when(metadataManager.getMetadata()).thenReturn(metadata);
 
+    PoolManager poolManager = new PoolManager(context);
+    Mockito.when(context.poolManager()).thenReturn(poolManager);
+
     // Shutdown sequence:
     Mockito.when(context.reconnectionPolicy()).thenReturn(reconnectionPolicy);
     Mockito.when(context.retryPolicy()).thenReturn(retryPolicy);

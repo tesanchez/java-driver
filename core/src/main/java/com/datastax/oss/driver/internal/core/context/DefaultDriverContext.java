@@ -50,6 +50,7 @@ import com.datastax.oss.driver.internal.core.metadata.token.ReplicationStrategyF
 import com.datastax.oss.driver.internal.core.metadata.token.TokenFactoryRegistry;
 import com.datastax.oss.driver.internal.core.pool.ChannelPoolFactory;
 import com.datastax.oss.driver.internal.core.protocol.ByteBufPrimitiveCodec;
+import com.datastax.oss.driver.internal.core.session.PoolManager;
 import com.datastax.oss.driver.internal.core.session.RequestProcessorRegistry;
 import com.datastax.oss.driver.internal.core.ssl.JdkSslHandlerFactory;
 import com.datastax.oss.driver.internal.core.ssl.SslHandlerFactory;
@@ -141,6 +142,8 @@ public class DefaultDriverContext implements InternalDriverContext {
   private final LazyReference<ReplicationStrategyFactory> replicationStrategyFactoryRef =
       new LazyReference<>(
           "replicationStrategyFactory", this::buildReplicationStrategyFactory, cycleDetector);
+  private final LazyReference<PoolManager> poolManagerRef =
+      new LazyReference<>("poolManager", this::buildPoolManager, cycleDetector);
 
   private final DriverConfig config;
   private final DriverConfigLoader configLoader;
@@ -321,6 +324,10 @@ public class DefaultDriverContext implements InternalDriverContext {
     return new DefaultReplicationStrategyFactory(this);
   }
 
+  protected PoolManager buildPoolManager() {
+    return new PoolManager(this);
+  }
+
   @Override
   public String sessionName() {
     return sessionName;
@@ -464,6 +471,11 @@ public class DefaultDriverContext implements InternalDriverContext {
   @Override
   public ReplicationStrategyFactory replicationStrategyFactory() {
     return replicationStrategyFactoryRef.get();
+  }
+
+  @Override
+  public PoolManager poolManager() {
+    return poolManagerRef.get();
   }
 
   @Override
