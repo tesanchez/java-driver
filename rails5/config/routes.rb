@@ -27,5 +27,5 @@ Rails.application.routes.draw do
     match full_path, to: "#{opts.fetch(:controller_name)}##{opts[:action_name]}", via: http_method
   end
 
-  add_swagger_route 'GET', '/users', controller_name: 'default', action_name: 'users_get'
+  add_swagger_route 'GET', '/SE-Design/HRTemilWebinar-Fork/0.0.1/users', controller_name: 'default', action_name: 'users_get'
 end
