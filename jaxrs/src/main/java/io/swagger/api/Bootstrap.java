@@ -18,7 +18,7 @@ public class Bootstrap extends HttpServlet {
       .description("get users from DB")
       .termsOfService("")
       .contact(new Contact()
-        .email(""))
+        .email("t.s@sb.com"))
       .license(new License()
         .name("")
         .url("http://unlicense.org"));
