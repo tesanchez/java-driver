@@ -8,6 +8,7 @@ import io.swagger.annotations.ApiParam;
 import io.swagger.jaxrs.*;
 
 import io.swagger.model.InlineResponse200;
+import io.swagger.model.InlineResponse400;
 
 import java.util.Map;
 import java.util.List;
@@ -29,7 +30,7 @@ import javax.validation.constraints.*;
 
 
 @io.swagger.annotations.Api(description = "the users API")
-@javax.annotation.Generated(value = "io.swagger.codegen.languages.JavaJerseyServerCodegen", date = "2018-11-26T20:48:24.559Z")
+@javax.annotation.Generated(value = "io.swagger.codegen.languages.JavaJerseyServerCodegen", date = "2018-12-10T19:41:44.238Z")
 public class UsersApi  {
    private final UsersApiService delegate;
 
@@ -60,7 +61,9 @@ public class UsersApi  {
     
     @io.swagger.annotations.ApiOperation(value = "deletes users from DB", notes = "Deletes users from DB", response = Void.class, tags={  })
     @io.swagger.annotations.ApiResponses(value = { 
-        @io.swagger.annotations.ApiResponse(code = 200, message = "OK", response = Void.class) })
+        @io.swagger.annotations.ApiResponse(code = 200, message = "OK", response = Void.class),
+        
+        @io.swagger.annotations.ApiResponse(code = 400, message = "Invalid request", response = InlineResponse400.class) })
     public Response usersDelete(@Context SecurityContext securityContext)
     throws NotFoundException {
         return delegate.usersDelete(securityContext);

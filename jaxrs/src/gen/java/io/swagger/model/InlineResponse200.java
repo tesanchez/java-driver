@@ -24,7 +24,7 @@ import javax.validation.constraints.*;
 /**
  * InlineResponse200
  */
-@javax.annotation.Generated(value = "io.swagger.codegen.languages.JavaJerseyServerCodegen", date = "2018-11-26T20:48:24.559Z")
+@javax.annotation.Generated(value = "io.swagger.codegen.languages.JavaJerseyServerCodegen", date = "2018-12-10T19:41:44.238Z")
 public class InlineResponse200   {
   @JsonProperty("status")
   private Integer status = null;
